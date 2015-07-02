@@ -8,13 +8,30 @@ var net = require('net');
 var io = require('io');
 var mq = require('mq');
 var util = require('util');
-// var port
+var Leader;
+
+
+
+function checkLeader() {
+	var sidPort = readDNS();
+	for (var o in sidPort) {
+		var data = connect("isLeader")(sidPort[o]["port"]);
+		if (data["Leader"] != "-1") {
+			if (connect("isLeader")(sidPort[data["Leader"]]["port"], data["Leader"])["connect"] == true) {
+				Leader = sidPort[data["Leader"]]["port"];
+				return true;
+			}
+		}
+	}
+	return checkLeader();
+}
 
 write();
 
 function write() {
+	checkLeader();
 	var sql = "INSERT into data(value,createtime,key) values('hello'," + new Date().getTime() + ",'key')";
-	connect("write")(2001, sql);
+	connect("write")(Leader, sql);
 }
 
 
@@ -33,6 +50,8 @@ function readDNS() {
 	});
 	return sidPort;
 }
+
+
 
 function connect(method) {
 	return function() {

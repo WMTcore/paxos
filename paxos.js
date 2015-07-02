@@ -10,7 +10,7 @@ var mq = require('mq');
 var util = require('util');
 var dblog = db.open("sqlite:log1.db");
 var dbconn = db.open("sqlite:data1.db");
-var connect = require("connect");
+// var connect = require("connect");
 var fib = {};
 var keepSid = [];
 var uuid = "";
@@ -20,6 +20,22 @@ var lock = new coroutine.Semaphore(1);
 
 fib.choseResult = {};
 var hdlr = rpc.json({
+	isLeader: function(v) {
+		if (!util.isEmpty(v.params)) {
+			var LeaderID = v.params[0];
+			if (fib.status == "Leader" && fib.sid == Number(LeaderID))
+				return {
+					"connect": true
+				}
+		}
+		if (fib.status == "follower" || fib.status == "Leader")
+			return {
+				"Leader": fib.Leader
+			}
+		return {
+			"Leader": -1
+		}
+	},
 	choseLeader: function(v) {
 		var sid = v.params[0];
 		var clock = v.params[1];
@@ -108,10 +124,8 @@ var hdlr = rpc.json({
 var hdlrkeepAlive = rpc.json({
 	keepAlive: function(v) {
 		var sid = v.params[0];
-		console.notice("心跳id", v.params);
 		if (fib.status == "Leader" && util.isNumber(sid)) {
 			keepSid.push(sid);
-			console.notice("心跳id", sid);
 			coroutine.sleep(10000);
 			keepSid.splice(keepSid.indexOf(sid), 1);
 			return "keeping";
@@ -121,7 +135,7 @@ var hdlrkeepAlive = rpc.json({
 });
 
 
-// setting();
+setting();
 
 function synclog(maxid) {
 	var sqls = connect("synclog")(fib.LeaderPort, dblog.execute("SELECT max(lid) FROM log"), maxid)
@@ -142,19 +156,18 @@ function writePermit(sql, maxid) {
 		if (sid == fib.sid)
 			continue;
 		if (connect("writePermit")(sidPort[sid]["port"], fib.sid, maxid + 1, uuid) == "accept")
-			acceptServer.push(o.split(':')[1]);
+			acceptServer.push(sid);
 	}
 	acceptServer = util.unique(acceptServer);
-	console.error("acceptServer", acceptServer);
-	if (acceptServer.length >= allServer.length / 2) {
-		console.error("sql", sql);
+	if (acceptServer.length >= util.keys(sidPort).length / 2) {
+		console.log("sql", sql);
 		dbconn.execute(sql);
 		dblog.execute("insert into log(sid,sql,createtime) values(?,?,?)", fib.sid, sql, new Date().getTime());
-		allServer.some(function(o) {
-			if (o.split(':')[0] == fib.port)
-				return;
-			connect("execute")(o.split(':')[0], maxid + 1, uuid, sql)
-		})
+		for (var sid in sidPort) {
+			if (sid == fib.sid)
+				continue;
+			connect("execute")(sidPort[sid]["port"], maxid + 1, uuid, sql)
+		}
 		console.notice("数据写入成功");
 		return true;
 	} else {
@@ -211,8 +224,10 @@ function init() {
 }
 
 function choseLeader(sid) {
-	if (fib.status == "Leader" || fib.status == "follower")
+	if (fib.status == "Leader" || fib.status == "follower") {
+		flag = 0;
 		return;
+	}
 	if (flag == 1) {
 		coroutine.sleep("1000");
 		return choseLeader(fib.choseLeader);
@@ -231,7 +246,7 @@ function choseLeader(sid) {
 	console.notice('正在选举...')
 	for (var o in sidPort) {
 		if (o == fib.sid)
-			return;
+			continue;
 
 		var data = {};
 		data = connect("choseLeader")(sidPort[o]["port"], sid, fib.clock);
@@ -279,7 +294,7 @@ function analyzeData(choseLeader, sid) {
 }
 
 function readDNS() {
-	var dns = fs.openTextStream("../DNS.txt", "r+")
+	var dns = fs.openTextStream("DNS.txt", "r+")
 	var dnsData = dns.readLines();
 	var allServer = dnsData[0].split(',');
 	dns.dispose();
@@ -304,6 +319,7 @@ function confirmLeader() {
 			if (vote > util.keys(sidPort).length / 2) {
 				if (fib.sid == sid) {
 					fib.status = "Leader";
+					fib.Leader = sid;
 					fib.LeaderPort = sidPort[sid]["port"];
 					return isconfirmLeader--;
 				} else {
@@ -359,7 +375,7 @@ function CheckAlive() {
 	if (!util.isEmpty(sids)) {
 		coroutine.sleep(5000);
 		sids = util.difference(sinSid, keepSid);
-		console.error("sids--->", sids);
+		//console.error("sids--->", sids);
 		if (sids.length >= dnsSid.length / 2) {
 			console.error("init--->", sids);
 			init.start(++fib.clock);
@@ -369,24 +385,24 @@ function CheckAlive() {
 			console.error(sids)
 	}
 	console.notice("当前连接数:", keepSid.length);
-	coroutine.sleep(5000);
+	coroutine.sleep(10000);
 	CheckAlive.start();
 	return true;
 }
 
-// function connect(method) {
-// 	return function() {
-// 		var conn = new io.BufferedStream(net.connect("127.0.0.1", arguments[0]));
-// 		var jss = [];
-// 		jss.push('{"method":"');
-// 		jss.push(method);
-// 		jss.push('","params":');
-// 		jss.push(JSON.stringify(Array.prototype.slice.call(arguments, 1)));
-// 		jss.push("}");
-// 		var ps = new Buffer(jss.join(""));
-// 		conn.writePacket(ps);
-// 		var result = JSON.parse(conn.readPacket()).result;
-// 		conn.close();
-// 		return result;
-// 	}
-// }
+function connect(method) {
+	return function() {
+		var conn = new io.BufferedStream(net.connect("127.0.0.1", arguments[0]));
+		var jss = [];
+		jss.push('{"method":"');
+		jss.push(method);
+		jss.push('","params":');
+		jss.push(JSON.stringify(Array.prototype.slice.call(arguments, 1)));
+		jss.push("}");
+		var ps = new Buffer(jss.join(""));
+		conn.writePacket(ps);
+		var result = JSON.parse(conn.readPacket()).result;
+		conn.close();
+		return result;
+	}
+}
